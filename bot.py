@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SHEET_ID = os.environ.get("SHEET_ID", "")
+SHEET_URL = os.environ.get("SHEET_URL", "")  # NEW - Secret 4, your Apps Script /exec link
 
 # All 8 cities - Socrata API domains
 CITIES = [
@@ -25,6 +26,18 @@ def send_telegram(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=20)
     except Exception as e:
         print(f"Telegram failed: {e}")
+
+def send_to_sheet(lead):
+    # NEW - Sends lead to Google Sheet via Apps Script
+    if not SHEET_URL:
+        print("No SHEET_URL, skipping sheet")
+        return
+    try:
+        # Send as JSON - Apps Script will write a row
+        requests.post(SHEET_URL, json=lead, timeout=20)
+        print(f"Sheet saved: {lead['address']}")
+    except Exception as e:
+        print(f"Sheet failed: {e}")
 
 def is_roof_job(text):
     if not text: return False
@@ -48,12 +61,9 @@ def get_contractor(row):
 
 def fetch_city(city):
     leads = []
-    # UNLIMITED - pagination, no max limit
     offset = 0
     while True:
         try:
-            # Try generic Socrata query - tries to discover dataset
-            # We use a broad query, filter in Python so we never miss leads
             url = f"https://{city['domain']}/resource/{city['dataset']}.json?$limit=100&$offset={offset}&$order=issued_date DESC"
             r = requests.get(url, timeout=30)
             if r.status_code != 200:
@@ -61,11 +71,10 @@ def fetch_city(city):
                 break
             data = r.json()
             if not data:
-                break  # No more data, stop this city
+                break
             print(f"{city['name']} page offset {offset} got {len(data)} rows")
             for row in data:
                 try:
-                    # Extract fields flexibly - different cities use different names
                     desc = str(row.get("description", "") or row.get("work_description", "") or row.get("permit_type", "") or row.get("type", "") or "")
                     if not is_roof_job(desc + " " + str(row.get("permit_type", ""))):
                         continue
@@ -77,12 +86,11 @@ def fetch_city(city):
                     address = str(row.get("address", "") or row.get("site_address", "") or row.get("location_address", "") or "")
                     if not address or address.lower() in ["none", "null"]:
                         continue
-                    # Date check - last 48h to avoid empty days
                     date_str = str(row.get("issued_date", "") or row.get("issue_date", "") or row.get("permit_date", "") or row.get("applied_date", "") or datetime.now().isoformat())
                     leads.append({
                         "city": city["name"],
                         "name": str(row.get("owner_name", "") or row.get("applicant_name", "") or row.get("owner", "") or "Owner"),
-                        "phone": "",  # Phone enrichment step - see note below
+                        "phone": "",
                         "address": address,
                         "job": desc[:120] or "Roof Replacement",
                         "value": value,
@@ -92,9 +100,8 @@ def fetch_city(city):
                     })
                 except Exception as e:
                     print(f"Skip 1 bad lead in {city['name']}: {e}")
-                    continue  # Never stop for 1 bad lead
+                    continue
             offset += 100
-            # Safety: if offset is huge, keep going - NO LIMIT
             if len(data) < 100:
                 break
         except Exception as e:
@@ -112,16 +119,15 @@ def main():
             print(f"{city['name']}: {len(leads)} high-quality leads found")
             summary.append(f"{city['name']} {len(leads)}")
             for lead in leads:
-                # For now, we send without phone check - phone enrichment needs paid API
-                # We still send lead, you can find phone via property tax site
                 msg = f"🔥 NEW ROOF LEAD - {lead['city'].upper()}\n\nName: {lead['name']}\nAddress: {lead['address']}\nJob: {lead['job']}\nValue: ${lead['value']:,.0f}\nDate Filed: {lead['date']}\nContractor: NONE\nScore: {'HOT' if lead['value']>15000 else 'WARM'}\nPermit: {lead['link']}"
                 send_telegram(msg)
+                send_to_sheet(lead)  # NEW - also save to Sheet
                 total += 1
-                time.sleep(1)  # Avoid Telegram spam limit
+                time.sleep(1)
         except Exception as e:
             print(f"City {city['name']} crashed, continuing to next city: {e}")
             summary.append(f"{city['name']} 0 - API down, retry next run")
-            continue  # NEVER STOP BOT FOR 1 CITY
+            continue
     send_telegram(f"✅ Bot Finished - Total {total} leads\n" + "\n".join(summary))
     print(f"DONE Total {total}")
 
