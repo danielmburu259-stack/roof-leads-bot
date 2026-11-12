@@ -1,135 +1,192 @@
-# Roof Leads Bot - Unlimited, All Cities, Never Crashes
-# Runs on GitHub Actions, $0 free
-import os, time, requests, json
-from datetime import datetime, timedelta
+# Roof Leads Bot v2 - Professional
+# Source: Government Open Data Portals
+# Chicago: data.cityofchicago.org / ydr8-5enu
+# Austin: data.austintexas.gov / 3syk-w9eu
+# Buyers: Roofing companies. Lead = Fresh permit, verifiable, no contractor yet
+import os, requests, json, re
+from datetime import datetime, timedelta, timezone
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-SHEET_ID = os.environ.get("SHEET_ID", "")
-SHEET_URL = os.environ.get("SHEET_URL", "")  # NEW - Secret 4, your Apps Script /exec link
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+SHEET_URL = os.environ.get("SHEET_URL", "").strip()
 
-# All 8 cities - Socrata API domains
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise SystemExit("MISSING TELEGRAM_TOKEN or TELEGRAM_CHAT_ID secret")
+
+DAYS_BACK = 14
+MAX_PER_CITY = 200
+MAX_TOTAL = 30
+MIN_VALUE = 3000
+
+ROOF_WORDS = ["roof", "reroof", "re-roof", "re roof", "roofing", "shingle", "tpo", "tear off", "tear-off", "flat roof", "roof replacement", "roof repair"]
+
 CITIES = [
-    {"name": "Houston", "domain": "data.houstontx.gov", "dataset": "building-permits"},
-    {"name": "Dallas", "domain": "data.dallas.gov", "dataset": "building-permits"},
-    {"name": "Miami", "domain": "data.miamidade.gov", "dataset": "building-permits"},
-    {"name": "Tampa", "domain": "data.tampagov.net", "dataset": "building-permits"},
-    {"name": "Phoenix", "domain": "data.phoenix.gov", "dataset": "building-permits"},
-    {"name": "Atlanta", "domain": "data.atlantaga.gov", "dataset": "building-permits"},
-    {"name": "Charlotte", "domain": "data.charlottenc.gov", "dataset": "building-permits"},
-    {"name": "Nashville", "domain": "data.nashville.gov", "dataset": "building-permits"},
+    {
+        "name": "Chicago", "domain": "data.cityofchicago.org", "dataset": "ydr8-5enu",
+        "date_field": "issue_date",
+        "desc_field": "work_description",
+        "addr_field": "street_address",
+        "value_field": "reported_cost",
+        "id_field": "permit_",
+        "contact_field": "contact_1_name",
+        "contractor_field": "contact_1_type",
+    },
+    {
+        "name": "Austin", "domain": "data.austintexas.gov", "dataset": "3syk-w9eu",
+        "date_field": "issueddate",
+        "desc_field": "descriptionofwork",
+        "addr_field": "originaladdress1",
+        "value_field": "valuation",
+        "id_field": "permitnumber",
+        "contact_field": "applicant",
+        "contractor_field": "contractor",
+    },
 ]
+
+def clean(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+def is_roof(text):
+    t = clean(text).lower()
+    return any(w in t for w in ROOF_WORDS)
+
+def parse_value(v):
+    try:
+        if v is None or str(v).strip() == "":
+            return 0
+        return float(str(v).replace("$", "").replace(",", "").strip())
+    except:
+        return 0
 
 def send_telegram(text):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=20)
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
+            timeout=20
+        )
+        print(f"Telegram: {r.status_code} {r.text[:200]}")
+        return r.status_code == 200
     except Exception as e:
-        print(f"Telegram failed: {e}")
+        print(f"Telegram EXCEPTION: {e}")
+        return False
 
 def send_to_sheet(lead):
-    # NEW - Sends lead to Google Sheet via Apps Script
     if not SHEET_URL:
-        print("No SHEET_URL, skipping sheet")
-        return
+        print("No SHEET_URL - skipping sheet")
+        return False
     try:
-        # Send as JSON - Apps Script will write a row
-        requests.post(SHEET_URL, json=lead, timeout=20)
-        print(f"Sheet saved: {lead['address']}")
+        r = requests.post(SHEET_URL, json=lead, timeout=20)
+        print(f"Sheet: {r.status_code} for {lead.get('permit_number')}")
+        return r.status_code == 200
     except Exception as e:
-        print(f"Sheet failed: {e}")
-
-def is_roof_job(text):
-    if not text: return False
-    t = text.lower()
-    return any(k in t for k in ["roof", "reroof", "re-roof", "roofing"])
-
-def get_value(row):
-    for k in ["estimated_cost", "valuation", "permit_valuation", "construction_cost", "total_valuation", "value"]:
-        try:
-            v = float(str(row.get(k, 0)).replace(",", "").replace("$", "") or 0)
-            if v > 0: return v
-        except: pass
-    return 0
-
-def get_contractor(row):
-    for k in ["contractor", "contractor_name", "contractor_company", "applicant"]:
-        v = str(row.get(k, "")).strip()
-        if v and v.lower() not in ["none", "null", "owner", "homeowner", "n/a"]:
-            return v
-    return "NONE"
+        print(f"Sheet EXCEPTION: {e}")
+        return False
 
 def fetch_city(city):
+    since = (datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)).strftime("%Y-%m-%d")
+    where = f"{city['date_field']} >= '{since}'"
+    url = f"https://{city['domain']}/resource/{city['dataset']}.json"
+    params = {"$where": where, "$order": f"{city['date_field']} DESC", "$limit": MAX_PER_CITY}
+    print(f"Fetching {city['name']}: {url} ? {where}")
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        print(f"{city['name']} API status: {r.status_code}")
+        if r.status_code != 200:
+            print(f"{city['name']} API error body: {r.text[:500]}")
+            return []
+        data = r.json()
+        print(f"{city['name']} got {len(data)} recent permits (last {DAYS_BACK} days)")
+    except Exception as e:
+        print(f"{city['name']} fetch failed: {e}")
+        return []
+
     leads = []
-    offset = 0
-    while True:
-        try:
-            url = f"https://{city['domain']}/resource/{city['dataset']}.json?$limit=100&$offset={offset}&$order=issued_date DESC"
-            r = requests.get(url, timeout=30)
-            if r.status_code != 200:
-                print(f"{city['name']} API {r.status_code}, trying alternate search")
-                break
-            data = r.json()
-            if not data:
-                break
-            print(f"{city['name']} page offset {offset} got {len(data)} rows")
-            for row in data:
-                try:
-                    desc = str(row.get("description", "") or row.get("work_description", "") or row.get("permit_type", "") or row.get("type", "") or "")
-                    if not is_roof_job(desc + " " + str(row.get("permit_type", ""))):
-                        continue
-                    value = get_value(row)
-                    if value < 10000:
-                        continue
-                    if get_contractor(row) != "NONE":
-                        continue
-                    address = str(row.get("address", "") or row.get("site_address", "") or row.get("location_address", "") or "")
-                    if not address or address.lower() in ["none", "null"]:
-                        continue
-                    date_str = str(row.get("issued_date", "") or row.get("issue_date", "") or row.get("permit_date", "") or row.get("applied_date", "") or datetime.now().isoformat())
-                    leads.append({
-                        "city": city["name"],
-                        "name": str(row.get("owner_name", "") or row.get("applicant_name", "") or row.get("owner", "") or "Owner"),
-                        "phone": "",
-                        "address": address,
-                        "job": desc[:120] or "Roof Replacement",
-                        "value": value,
-                        "contractor": "NONE",
-                        "date": date_str[:10],
-                        "link": f"https://{city['domain']}"
-                    })
-                except Exception as e:
-                    print(f"Skip 1 bad lead in {city['name']}: {e}")
-                    continue
-            offset += 100
-            if len(data) < 100:
-                break
-        except Exception as e:
-            print(f"{city['name']} failed: {e}, retry in 30s")
-            time.sleep(30)
-            break
+    seen = set()
+    for row in data:
+        desc = clean(row.get(city["desc_field"], ""))
+        if not desc:
+            desc = clean(row.get("permit_type_description", "") or row.get("permit_type", "") or row.get("workclass", ""))
+        if not is_roof(desc):
+            continue
+
+        value = parse_value(row.get(city["value_field"]))
+        if 0 < value < MIN_VALUE:
+            continue
+
+        permit_no = clean(row.get(city["id_field"], "")) or clean(row.get("permit_number", "")) or clean(row.get("id", ""))
+        if permit_no in seen:
+            continue
+        seen.add(permit_no)
+
+        address = clean(row.get(city["addr_field"], ""))
+        if not address:
+            continue
+
+        contractor = clean(row.get(city["contractor_field"], ""))
+        has_contractor = bool(contractor) and contractor.lower() not in ["none", "null", "n/a", "owner", "homeowner", "applicant"]
+        date_str = clean(row.get(city["date_field"], ""))[:10]
+        contact = clean(row.get(city["contact_field"], ""))
+
+        score = 50
+        if not has_contractor:
+            score += 30
+        if value >= 15000:
+            score += 20
+        elif value >= 8000:
+            score += 10
+        label = "HOT" if score >= 80 else "WARM" if score >= 60 else "COOL"
+
+        leads.append({
+            "city": city["name"],
+            "permit_number": permit_no,
+            "name": contact if contact else "Not in public record",
+            "phone": "Not in public record - lookup by address",
+            "address": address,
+            "job": desc[:150] or "Roof Work",
+            "value": value,
+            "contractor": contractor if contractor else "NONE / Unknown",
+            "date": date_str,
+            "score": label,
+            "link": f"https://{city['domain']}/d/{city['dataset']}",
+            "source": "Government Open Data - City Permit Portal",
+        })
+    leads.sort(key=lambda x: (x["score"] != "HOT", x["score"] != "WARM"))
     return leads
 
 def main():
-    total = 0
+    all_leads = []
     summary = []
     for city in CITIES:
-        try:
-            leads = fetch_city(city)
-            print(f"{city['name']}: {len(leads)} high-quality leads found")
-            summary.append(f"{city['name']} {len(leads)}")
-            for lead in leads:
-                msg = f"🔥 NEW ROOF LEAD - {lead['city'].upper()}\n\nName: {lead['name']}\nAddress: {lead['address']}\nJob: {lead['job']}\nValue: ${lead['value']:,.0f}\nDate Filed: {lead['date']}\nContractor: NONE\nScore: {'HOT' if lead['value']>15000 else 'WARM'}\nPermit: {lead['link']}"
-                send_telegram(msg)
-                send_to_sheet(lead)  # NEW - also save to Sheet
-                total += 1
-                time.sleep(1)
-        except Exception as e:
-            print(f"City {city['name']} crashed, continuing to next city: {e}")
-            summary.append(f"{city['name']} 0 - API down, retry next run")
-            continue
-    send_telegram(f"✅ Bot Finished - Total {total} leads\n" + "\n".join(summary))
-    print(f"DONE Total {total}")
+        leads = fetch_city(city)
+        summary.append(f"{city['name']}: {len(leads)} roof leads")
+        print(f"{city['name']}: {len(leads)} roof leads after filters")
+        all_leads.extend(leads)
+
+    to_send = all_leads[:MAX_TOTAL]
+    print(f"TOTAL to send: {len(to_send)} / found {len(all_leads)}")
+
+    for lead in to_send:
+        value_txt = f"${lead['value']:,.0f}" if lead["value"] > 0 else "Not listed"
+        msg = (
+            f"🔥 NEW ROOF LEAD - {lead['city'].upper()} - {lead['score']}\n\n"
+            f"Permit: {lead['permit_number']}\n"
+            f"Name / Applicant: {lead['name']}\n"
+            f"Phone: {lead['phone']}\n"
+            f"Address: {lead['address']}, {lead['city']}\n"
+            f"Job: {lead['job']}\n"
+            f"Value: {value_txt}\n"
+            f"Date Filed: {lead['date']}\n"
+            f"Contractor: {lead['contractor']}\n"
+            f"Verify: {lead['link']}\n"
+            f"Source: Government Open Data"
+        )
+        send_telegram(msg)
+        send_to_sheet(lead)
+
+    summary_msg = f"✅ Bot Finished - Sent {len(to_send)} leads (found {len(all_leads)})\n" + "\n".join(summary)
+    send_telegram(summary_msg)
+    print(f"DONE Sent {len(to_send)}")
 
 if __name__ == "__main__":
     main()
