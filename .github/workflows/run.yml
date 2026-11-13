@@ -1,30 +1,21 @@
-name: Roof Leads Bot
-
+name: Run Bot
 on:
   schedule:
-    - cron: '0 8 * * *'
-    - cron: '0 20 * * *'
+    - cron: '0 4 * * *'
   workflow_dispatch:
-
 jobs:
-  run-bot:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - name: Get code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install tools
-        run: pip install -r requirements.txt
-
-      - name: Run Bot
+      - run: pip install -r requirements.txt
+      - run: python bot.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_URL: ${{ secrets.SHEET_URL }}
-        run: python bot.py
