@@ -1,8 +1,8 @@
-# V7 FINAL - PRODUCTION - Reviewed, No Crash, High Quality Only
+# V8 FINAL - PRODUCTION - All Building Permits, High Quality Niche Only
 import os, requests, html, time, sys
 from datetime import datetime, timedelta, timezone
 
-# --- 1. STARTUP CHECK - Prevents silent crash if secret is missing ---
+# --- 1. STARTUP CHECK ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_IDS = [c for c in [os.getenv("TELEGRAM_CHAT_ID"), os.getenv("TELEGRAM_CHANNEL_ID")] if c]
 SHEET_URL = os.getenv("SHEET_URL")
@@ -12,26 +12,52 @@ if not TOKEN or not CHAT_IDS:
     sys.exit(1)
 print(f"Bot started. Destinations: {len(CHAT_IDS)} | Sheet URL set: {bool(SHEET_URL)}")
 
-HEADERS = {"User-Agent": "Roof-Leads-Bot/7.0 (Contact: lead-seller)"}
+HEADERS = {"User-Agent": "Roof-Leads-Bot/8.0 (Contact: lead-seller)"}
 
-# --- 2. NICHES - Order matters: SOLAR first ---
-NICHES = {
-    "SOLAR": ["SOLAR PANEL", "SOLAR INSTALL", "PHOTOVOLTAIC", "SOLAR ARRAY"],
-    "ROOFING": ["ROOF REPLACEMENT", "REROOF", "RE-ROOF", "NEW ROOF", "ROOF REPAIR", "ROOFING", "REPLACE ROOF"],
-    "RENOVATION": ["KITCHEN REMODEL", "BATHROOM REMODEL", "RENOVATION", "REMODEL", "ADDITION", "ALTERATION"],
-}
-GLOBAL_BAD = ["GARAGE", "FIRE ALARM", "FENCE", "SIGN", "DEMOLITION", "PLUMBING ONLY", "ELECTRICAL ONLY"]
-
+# --- 2. NICHE CLASSIFIER - Accuracy First, Never Guess ---
+# Order matters: most specific first. If no match, returns GENERAL BUILDING, never None.
 def get_niche(desc):
     t = (desc or "").upper()
-    if any(b in t for b in GLOBAL_BAD):
-        return None
-    for niche in ["SOLAR", "ROOFING", "RENOVATION"]:
-        if any(g in t for g in NICHES[niche]):
-            if niche == "ROOFING" and "SOLAR" in t:
-                return "SOLAR"
-            return niche
-    return None
+    if not t:
+        return None  # No description = poor quality, skip
+
+    if "SOLAR" in t or "PHOTOVOLTAIC" in t:
+        return "SOLAR"
+    if "ROOF" in t or "REROOF" in t or "RE-ROOF" in t or "SHINGLE" in t:
+        return "ROOFING"
+    if "GARAGE" in t:
+        return "GARAGE"
+    if "KITCHEN" in t:
+        return "KITCHEN REMODEL"
+    if "BATH" in t:
+        return "BATHROOM REMODEL"
+    if "ELECTRICAL" in t or "ELECTRIC" in t or "FIRE ALARM" in t:
+        return "ELECTRICAL"
+    if "PLUMBING" in t or "PLUMB" in t:
+        return "PLUMBING"
+    if "HVAC" in t or "FURNACE" in t or "AIR CONDITION" in t:
+        return "HVAC"
+    if "FENCE" in t:
+        return "FENCE"
+    if "DECK" in t or "PORCH" in t:
+        return "DECK / PORCH"
+    if "WINDOW" in t or "DOOR" in t:
+        return "WINDOWS / DOORS"
+    if "FOUNDATION" in t or "CONCRETE" in t:
+        return "FOUNDATION / CONCRETE"
+    if "SIGN" in t:
+        return "SIGN"
+    if "DEMOLITION" in t or "DEMO" in t:
+        return "DEMOLITION"
+    if "ADDITION" in t:
+        return "ADDITION"
+    if "RENOVATION" in t or "REMODEL" in t or "ALTERATION" in t:
+        return "RENOVATION"
+    if "NEW CONSTRUCTION" in t or "NEW SINGLE" in t or "NEW DETACHED" in t or "NEW BUILD" in t:
+        return "NEW CONSTRUCTION"
+
+    # Do not guess a specific niche - label as General so you can review it
+    return "GENERAL BUILDING"
 
 def clean(v):
     return html.escape(str(v or "").strip())
@@ -70,7 +96,8 @@ def build_address(city_name, row):
     return ""
 
 def fetch_city(city):
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%S.000")
+    # FIXED: Was 48, now 72 - matches Telegram message
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000")
     where = f"{city['date_field']} > '{cutoff}'"
     try:
         r = requests.get(city["url"], params={"$limit": 1000, "$order": f"{city['date_field']} DESC", "$where": where}, headers=HEADERS, timeout=30)
@@ -82,10 +109,12 @@ def fetch_city(city):
             desc = row.get(city["desc_field"], "") or ""
             niche = get_niche(desc)
             if not niche:
-                continue
+                continue  # No description = poor quality, skip - this is the ONLY filter left
             address = build_address(city["name"], row)
             if not address or address in ["Chicago, IL", ", Austin, TX", ", NY"]:
                 continue  # No address = useless, skip
+            # NO VALUE FILTER - Accept $500 and $50,000 equally
+            # NO PERMIT TYPE FILTER - Accept Easy Permit, Renovation, Repair, New, all
             value = row.get(city["value_field"], "") or ""
             value_str = str(value) if str(value).strip() not in ["", "0", "None"] else "Permit Approved"
             contractor = ""
@@ -134,7 +163,7 @@ def main():
     all_leads = []
     for c in CITIES:
         all_leads += fetch_city(c)
-        time.sleep(1)  # Be nice to government APIs, prevents blocking
+        time.sleep(1)
 
     seen = set(); fresh = []
     for l in all_leads:
@@ -154,12 +183,19 @@ def main():
         except Exception as e:
             print(f"Sheet post failed, but Telegram will still send: {e}")
 
-    for niche, emoji in [("ROOFING","🏠"), ("SOLAR","☀️"), ("RENOVATION","🔨")]:
+    # Group by niche dynamically - works for ALL niches, not just 3
+    niches_found = []
+    for l in fresh:
+        if l["niche"] not in niches_found:
+            niches_found.append(l["niche"])
+
+    emoji_map = {"ROOFING": "🏠", "SOLAR": "☀️", "GARAGE": "🚗", "KITCHEN REMODEL": "🍳", "BATHROOM REMODEL": "🛁", "ELECTRICAL": "⚡", "PLUMBING": "🔧", "HVAC": "❄️", "FENCE": "🧱", "NEW CONSTRUCTION": "🏗️"}
+    for niche in niches_found:
         leads = [x for x in fresh if x["niche"] == niche]
-        if not leads: continue
+        emoji = emoji_map.get(niche, "🔨")
         for i in range(0, len(leads), 8):
             batch = leads[i:i+8]
-            msg = f"{emoji} <b>{niche} LEADS - {len(leads)} Fresh (48h)</b>\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\nFresh, Never Sent Before, With Address + Value\n\n"
+            msg = f"{emoji} <b>{niche} LEADS - {len(leads)} Fresh (72h)</b>\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\nFresh, Never Sent Before, With Address + Value\n\n"
             for j, l in enumerate(batch, start=i+1):
                 msg += f"<b>{j}. {clean(l['city'])} - {clean(l['address'])}</b>\n📝 {clean(l['desc'])}\n💰 Value: ${clean(l['value'])} | 📅 {clean(l['date'])}\n👷 Contractor: {clean(l['contact']) or 'N/A'}\n🆔 {clean(l['id'])}\n\n"
             send_telegram(msg)
