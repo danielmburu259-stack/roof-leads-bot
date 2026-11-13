@@ -1,8 +1,7 @@
-# V8 FINAL - PRODUCTION - All Building Permits, High Quality Niche Only
+# V8.1 FINAL - FREE FIXES ONLY - No Paid APIs, No Risky Scraping
 import os, requests, html, time, sys
 from datetime import datetime, timedelta, timezone
 
-# --- 1. STARTUP CHECK ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_IDS = [c for c in [os.getenv("TELEGRAM_CHAT_ID"), os.getenv("TELEGRAM_CHANNEL_ID")] if c]
 SHEET_URL = os.getenv("SHEET_URL")
@@ -12,21 +11,34 @@ if not TOKEN or not CHAT_IDS:
     sys.exit(1)
 print(f"Bot started. Destinations: {len(CHAT_IDS)} | Sheet URL set: {bool(SHEET_URL)}")
 
-HEADERS = {"User-Agent": "Roof-Leads-Bot/8.0 (Contact: lead-seller)"}
+HEADERS = {"User-Agent": "Roof-Leads-Bot/8.1 (Contact: lead-seller)"}
 
-# --- 2. NICHE CLASSIFIER - Accuracy First, Never Guess ---
-# Order matters: most specific first. If no match, returns GENERAL BUILDING, never None.
+# --- FREE FIX P2: Skip paperwork that is NOT a job ---
+SKIP_IF_CONTAINS = [
+    "DOES NOT AUTHORIZE",
+    "DOES NOT AUTHORIZE ANY CONSTRUCTION",
+    "APPROVAL OF NEW PLAN FOR",
+    "PLAN REVIEW ONLY",
+    "NO CONSTRUCTION WORK",
+]
+
 def get_niche(desc):
     t = (desc or "").upper()
     if not t:
-        return None  # No description = poor quality, skip
+        return None
+    # P2: Junk filter - free, safe, no API call
+    if any(s in t for s in SKIP_IF_CONTAINS):
+        return None
 
     if "SOLAR" in t or "PHOTOVOLTAIC" in t:
         return "SOLAR"
-    if "ROOF" in t or "REROOF" in t or "RE-ROOF" in t or "SHINGLE" in t:
-        return "ROOFING"
+    # P1 FIX: ROOFING only on real roofing words.
+    # "HIP ROOF", "ROOF HEIGHT", "ROOF LINE" alone = NOT roofing.
+    # Check GARAGE first, because "GARAGE... HIP ROOF" is a garage.
     if "GARAGE" in t:
         return "GARAGE"
+    if "ROOF REPLACEMENT" in t or "REROOF" in t or "RE-ROOF" in t or "ROOF REPAIR" in t or "ROOFING" in t or "REPLACE ROOF" in t or "NEW ROOF" in t or "ROOF COVERING" in t:
+        return "ROOFING"
     if "KITCHEN" in t:
         return "KITCHEN REMODEL"
     if "BATH" in t:
@@ -55,8 +67,6 @@ def get_niche(desc):
         return "RENOVATION"
     if "NEW CONSTRUCTION" in t or "NEW SINGLE" in t or "NEW DETACHED" in t or "NEW BUILD" in t:
         return "NEW CONSTRUCTION"
-
-    # Do not guess a specific niche - label as General so you can review it
     return "GENERAL BUILDING"
 
 def clean(v):
@@ -96,7 +106,6 @@ def build_address(city_name, row):
     return ""
 
 def fetch_city(city):
-    # FIXED: Was 48, now 72 - matches Telegram message
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000")
     where = f"{city['date_field']} > '{cutoff}'"
     try:
@@ -104,19 +113,23 @@ def fetch_city(city):
         if r.status_code != 200:
             print(f"{city['name']} API {r.status_code} - skipping, others continue")
             return []
+        data = r.json()
+        print(f"{city['name']}: API returned {len(data)} rows in 72h")
         out = []
-        for row in r.json():
+        for row in data:
             desc = row.get(city["desc_field"], "") or ""
             niche = get_niche(desc)
             if not niche:
-                continue  # No description = poor quality, skip - this is the ONLY filter left
+                continue
             address = build_address(city["name"], row)
             if not address or address in ["Chicago, IL", ", Austin, TX", ", NY"]:
-                continue  # No address = useless, skip
-            # NO VALUE FILTER - Accept $500 and $50,000 equally
-            # NO PERMIT TYPE FILTER - Accept Easy Permit, Renovation, Repair, New, all
+                continue
+            # P3 FIX: Free and honest. If no cost, say Not Listed.
+            # Never put "Permit Approved" in the Value column - that's status, not money.
             value = row.get(city["value_field"], "") or ""
-            value_str = str(value) if str(value).strip() not in ["", "0", "None"] else "Permit Approved"
+            value_str = str(value).strip()
+            if value_str in ["", "0", "None", "0.0"]:
+                value_str = "Not Listed"
             contractor = ""
             if city["name"] == "Chicago":
                 contractor = row.get("contractor_name","") or row.get("applicant_name","") or ""
@@ -183,7 +196,6 @@ def main():
         except Exception as e:
             print(f"Sheet post failed, but Telegram will still send: {e}")
 
-    # Group by niche dynamically - works for ALL niches, not just 3
     niches_found = []
     for l in fresh:
         if l["niche"] not in niches_found:
@@ -197,7 +209,7 @@ def main():
             batch = leads[i:i+8]
             msg = f"{emoji} <b>{niche} LEADS - {len(leads)} Fresh (72h)</b>\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\nFresh, Never Sent Before, With Address + Value\n\n"
             for j, l in enumerate(batch, start=i+1):
-                msg += f"<b>{j}. {clean(l['city'])} - {clean(l['address'])}</b>\n📝 {clean(l['desc'])}\n💰 Value: ${clean(l['value'])} | 📅 {clean(l['date'])}\n👷 Contractor: {clean(l['contact']) or 'N/A'}\n🆔 {clean(l['id'])}\n\n"
+                msg += f"<b>{j}. {clean(l['city'])} - {clean(l['address'])}</b>\n📝 {clean(l['desc'])}\n💰 Value: {clean(l['value'])} | 📅 {clean(l['date'])}\n👷 Contractor: {clean(l['contact']) or 'N/A'}\n🆔 {clean(l['id'])}\n\n"
             send_telegram(msg)
     send_telegram(f"✅ <b>Bot Finished - Auto Run</b>\nSent {len(fresh)} NEW fresh leads.\nNo duplicates. Next auto-run in 6 hours.")
 
