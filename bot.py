@@ -144,7 +144,7 @@ def main():
 
     print(f"FINAL: {len(fresh)} fresh, new, clean leads")
     if not fresh:
-        send_telegram("✅ <b>Bot Finished - Auto Run</b>\n0 new fresh leads in last 48h.\nNo duplicates sent. Next check in 6 hours.")
+        send_telegram("✅ <b>Bot Finished - Auto Run</b>\n0 new fresh leads in last 72h.\nNo duplicates sent. Next check in 6 hours.")
         return
 
     if SHEET_URL:
